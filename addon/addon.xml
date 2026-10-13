@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- tools/build.sh adds usr/ and fills in the version. -->
+<addon id="script.module.oriel.webkit" name="Oriel WebKit" version="@VERSION@" provider-name="Oriel">
+  <requires>
+    <import addon="xbmc.python" version="3.1.0"/>
+  </requires>
+  <extension point="xbmc.python.module" library="lib"/>
+  <extension point="xbmc.addon.metadata">
+    <summary lang="en_GB">WPE WebKit for Oriel apps</summary>
+    <platform>linux-aarch64</platform>
+    <license>Various</license>
+    <source>https://github.com/GR3ee3N/oriel-webkit</source>
+    <website>https://github.com/GR3ee3N/oriel-webkit</website>
+  </extension>
+</addon>
