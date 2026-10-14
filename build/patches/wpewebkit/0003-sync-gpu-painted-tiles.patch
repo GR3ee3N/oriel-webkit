@@ -1,0 +1,257 @@
+Synchronize GPU-painted tiles across GL contexts
+
+The compositor and the Skia painting threads share pooled GL textures across
+contexts without fences; Mali-G310 then runs their GPU work out of order and
+tiles show old pixels. Painted tiles are copied, painting targets (tiles and
+scrollbars) are pooled apart from the compositor's textures, and a texture's
+next writer waits for its last reader (or the work finishes when no fence can
+be made).
+
+--- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.cpp
++++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.cpp
+@@ -28,6 +28,8 @@
+ #include <wtf/SystemTracing.h>
+ 
+ #if USE(SKIA)
++#include "GLFence.h"
++#include "PlatformDisplay.h"
+ #include "SkiaPaintingEngine.h"
+ #endif
+ 
+@@ -91,12 +93,18 @@
+             auto& buffer = static_cast<CoordinatedAcceleratedTileBuffer&>(update.buffer.get());
+             buffer.serverWait();
+ 
+-            // Fast path: whole tile content changed -- take ownership of the incoming texture, replacing the existing tile buffer (avoiding texture copies).
+-            if (update.sourceRect.size() == update.tileRect.size()) {
+-                ASSERT(update.sourceRect.location().isZero());
+-                m_texture->swapTexture(buffer.texture());
+-            } else
+-                m_texture->copyFromExternalTexture(buffer.texture().id(), update.sourceRect, toIntSize(update.bufferOffset));
++            // Modified for Oriel on 2026-10-14: always copy, so that painted textures stay with the
++            // painting contexts and tile textures with the compositor, and fence the copy:
++            // the painter that gets this texture next must not draw into it before the
++            // copy has read it. Mali-G310 runs the GPU work of different contexts out of
++            // order, so without the fence old pixels could win.
++            m_texture->copyFromExternalTexture(buffer.texture().id(), update.sourceRect, toIntSize(update.bufferOffset));
++            auto& glDisplay = PlatformDisplay::sharedDisplay().glDisplay();
++            std::unique_ptr<GLFence> fence = GLFence::isSupported(glDisplay) ? GLFence::create(glDisplay) : nullptr;
++            if (fence)
++                buffer.texture().setReuseFence(WTF::move(fence));
++            else
++                glFinish();
+ 
+             WTFEndSignpost(this, CopyTextureGPUToGPU);
+             WTFEndSignpost(this, CoordinatedSwapBuffer);
+--- a/Source/WebCore/platform/graphics/texmap/BitmapTexture.h
++++ b/Source/WebCore/platform/graphics/texmap/BitmapTexture.h
+@@ -33,6 +33,7 @@
+ #include "IntSize.h"
+ #include "PixelFormat.h"
+ #include "TextureMapperGLHeaders.h"
++#include <wtf/Lock.h>
+ #include <wtf/OptionSet.h>
+ #include <wtf/RefCounted.h>
+ #include <wtf/RefPtr.h>
+@@ -45,6 +46,7 @@
+ 
+ namespace WebCore {
+ 
++class GLFence;
+ class GraphicsLayer;
+ class NativeImage;
+ class TextureMapper;
+@@ -60,6 +62,10 @@
+         ForceLinearBuffer = 1 << 3,
+         ForceVivanteSuperTiledBuffer = 1 << 4,
+ #endif
++        // Modified for Oriel on 2026-10-14: what Skia paints tiles and scrollbars into; the
++        // pool keeps these apart from the compositor's textures, so two GL contexts never
++        // write one texture.
++        PaintingTarget = 1 << 5,
+     };
+ 
+     static Ref<BitmapTexture> create(const IntSize& size, OptionSet<Flags> flags = { })
+@@ -100,6 +106,12 @@
+ 
+     void copyFromExternalTexture(GLuint sourceTextureID, const IntRect& targetRect, const IntSize& sourceOffset);
+ 
++    // Modified for Oriel on 2026-10-14: the GPU work that last used the texture in another
++    // context; the next context to draw into it waits for it first. A fence is only
++    // replaced by one of later work, so a borrower that gives up keeps it in place.
++    void setReuseFence(std::unique_ptr<GLFence>&&);
++    void waitForReuse();
++
+     OptionSet<TextureMapperFlags> colorConvertFlags() const;
+ 
+ #if USE(GBM)
+@@ -135,6 +147,8 @@
+     ClipStack m_clipStack;
+     RefPtr<const FilterOperation> m_filterOperation;
+     PixelFormat m_pixelFormat { PixelFormat::RGBA8 };
++    Lock m_reuseFenceLock;
++    std::unique_ptr<GLFence> m_reuseFence WTF_GUARDED_BY_LOCK(m_reuseFenceLock);
+ 
+ #if USE(GBM)
+     std::unique_ptr<MemoryMappedGPUBuffer> m_memoryMappedGPUBuffer;
+--- a/Source/WebCore/platform/graphics/texmap/BitmapTexture.cpp
++++ b/Source/WebCore/platform/graphics/texmap/BitmapTexture.cpp
+@@ -25,6 +25,7 @@
+ #if USE(TEXTURE_MAPPER)
+ 
+ #include "GLContext.h"
++#include "GLFence.h"
+ #include "GraphicsContext.h"
+ #include "GraphicsLayer.h"
+ #include "ImageBuffer.h"
+@@ -521,8 +522,24 @@
+     glActiveTexture(boundActiveTexture);
+     glBindTexture(GL_TEXTURE_2D, boundTextureOnOriginalUnit);
+     glDeleteFramebuffers(1, &copyFbo);
++}
++
++// Modified for Oriel on 2026-10-14.
++void BitmapTexture::setReuseFence(std::unique_ptr<GLFence>&& fence)
++{
++    Locker locker { m_reuseFenceLock };
++    m_reuseFence = WTF::move(fence);
+ }
+ 
++void BitmapTexture::waitForReuse()
++{
++    // The fence stays: the wait only orders this context, and a borrower that fails
++    // before drawing must leave the texture as protected as it found it.
++    Locker locker { m_reuseFenceLock };
++    if (m_reuseFence)
++        m_reuseFence->serverWait();
++}
++
+ OptionSet<TextureMapperFlags> BitmapTexture::colorConvertFlags() const
+ {
+     if (m_pixelFormat == PixelFormat::RGBA8)
+--- a/Source/WebCore/platform/graphics/texmap/BitmapTexturePool.cpp
++++ b/Source/WebCore/platform/graphics/texmap/BitmapTexturePool.cpp
+@@ -80,6 +80,8 @@
+             && entry.texture->flags().contains(BitmapTexture::Flags::ForceLinearBuffer) == flags.contains(BitmapTexture::Flags::ForceLinearBuffer)
+             && entry.texture->flags().contains(BitmapTexture::Flags::ForceVivanteSuperTiledBuffer) == flags.contains(BitmapTexture::Flags::ForceVivanteSuperTiledBuffer)
+ #endif
++            // Modified for Oriel on 2026-10-14: painting targets are never shared with the compositor.
++            && entry.texture->flags().contains(BitmapTexture::Flags::PaintingTarget) == flags.contains(BitmapTexture::Flags::PaintingTarget)
+             && entry.texture->flags().contains(BitmapTexture::Flags::DepthBuffer) == flags.contains(BitmapTexture::Flags::DepthBuffer);
+     });
+ 
+--- a/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
++++ b/Source/WebCore/platform/graphics/skia/SkiaPaintingEngine.cpp
+@@ -107,7 +107,8 @@
+     if (renderingMode == RenderingMode::Accelerated) {
+         PlatformDisplay::sharedDisplay().skiaGLContext()->makeContextCurrent();
+ 
+-        OptionSet<BitmapTexture::Flags> textureFlags;
++        // Modified for Oriel on 2026-10-14: a texture only painting contexts draw into.
++        OptionSet<BitmapTexture::Flags> textureFlags { BitmapTexture::Flags::PaintingTarget };
+         if (!contentsOpaque)
+             textureFlags.add(BitmapTexture::Flags::SupportsAlpha);
+ 
+--- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedTileBuffer.cpp
++++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedTileBuffer.cpp
+@@ -169,7 +169,13 @@
+ {
+ }
+ 
+-CoordinatedAcceleratedTileBuffer::~CoordinatedAcceleratedTileBuffer() = default;
++CoordinatedAcceleratedTileBuffer::~CoordinatedAcceleratedTileBuffer()
++{
++    // Modified for Oriel on 2026-10-14: a paint nobody used; whoever draws into the
++    // texture next must still wait for it.
++    if (m_fence)
++        m_texture->setReuseFence(WTF::move(m_fence));
++}
+ 
+ IntSize CoordinatedAcceleratedTileBuffer::size() const
+ {
+@@ -184,6 +190,10 @@
+     if (!PlatformDisplay::sharedDisplay().skiaGLContext()->makeContextCurrent())
+         return false;
+ 
++    // Modified for Oriel on 2026-10-14: wait, in the context that paints, for the GPU work
++    // that last used the texture elsewhere.
++    m_texture->waitForReuse();
++
+     GrGLTextureInfo externalTexture;
+     externalTexture.fTarget = GL_TEXTURE_2D;
+     externalTexture.fID = m_texture->id();
+--- a/Source/WebCore/page/scrolling/coordinated/ScrollerCoordinated.cpp
++++ b/Source/WebCore/page/scrolling/coordinated/ScrollerCoordinated.cpp
+@@ -137,7 +137,10 @@
+     RELEASE_ASSERT(grContext);
+     GLContext::ScopedGLContextCurrent scopedCurrent(*glContext);
+ 
+-    Ref texture = BitmapTexturePool::singleton().acquireTexture(state.frameRect.size(), { BitmapTexture::Flags::SupportsAlpha });
++    // Modified for Oriel on 2026-10-14: a painting target, like tiles, and wait in this
++    // context for the GPU work that last used it elsewhere.
++    Ref texture = BitmapTexturePool::singleton().acquireTexture(state.frameRect.size(), { BitmapTexture::Flags::SupportsAlpha, BitmapTexture::Flags::PaintingTarget });
++    texture->waitForReuse();
+ 
+     GrGLTextureInfo externalTexture;
+     externalTexture.fTarget = GL_TEXTURE_2D;
+@@ -158,8 +161,17 @@
+     GraphicsContextSkia context(*canvas, RenderingMode::Accelerated, RenderingPurpose::DOM);
+     scrollerImp->paint(context, state.frameRect, state);
+ 
+-    grContext->flushAndSubmit(surface.get(), GLFence::isSupported(display.glDisplay()) ? GrSyncCpu::kNo : GrSyncCpu::kYes);
+-    auto buffer = CoordinatedPlatformLayerBufferRGB::create(WTF::move(texture), { TextureMapperFlags::ShouldBlend }, GLFence::create(display.glDisplay()));
++    // Modified for Oriel on 2026-10-14: as tiles do, finish the paint here when no fence
++    // can be made, so that a buffer without a fence never has painting pending.
++    std::unique_ptr<GLFence> fence;
++    if (GLFence::isSupported(display.glDisplay())) {
++        grContext->flushAndSubmit(surface.get(), GrSyncCpu::kNo);
++        fence = GLFence::create(display.glDisplay());
++        if (!fence)
++            grContext->submit(GrSyncCpu::kYes);
++    } else
++        grContext->flushAndSubmit(surface.get(), GrSyncCpu::kYes);
++    auto buffer = CoordinatedPlatformLayerBufferRGB::create(WTF::move(texture), { TextureMapperFlags::ShouldBlend }, WTF::move(fence));
+     if (!buffer)
+         return;
+ 
+--- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferRGB.cpp
++++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedPlatformLayerBufferRGB.cpp
+@@ -28,6 +28,9 @@
+ 
+ #if USE(COORDINATED_GRAPHICS)
+ #include "BitmapTexture.h"
++#include "GLContextWrapper.h"
++#include "GLFence.h"
++#include "PlatformDisplay.h"
+ #include "TextureMapper.h"
+ 
+ namespace WebCore {
+@@ -54,7 +57,27 @@
+ {
+ }
+ 
+-CoordinatedPlatformLayerBufferRGB::~CoordinatedPlatformLayerBufferRGB() = default;
++CoordinatedPlatformLayerBufferRGB::~CoordinatedPlatformLayerBufferRGB()
++{
++    // Modified for Oriel on 2026-10-14: a painting target goes back to the pool fenced.
++    // Not drawn: its paint's fence still applies (a paint without one has finished).
++    // Drawn by the compositor, whose context is current here: fence that draw, or
++    // wait for it.
++    if (!m_texture || !m_texture->flags().contains(BitmapTexture::Flags::PaintingTarget))
++        return;
++    if (m_fence) {
++        m_texture->setReuseFence(WTF::move(m_fence));
++        return;
++    }
++    if (!GLContextWrapper::currentContext())
++        return;
++    auto& glDisplay = PlatformDisplay::sharedDisplay().glDisplay();
++    std::unique_ptr<GLFence> fence = GLFence::isSupported(glDisplay) ? GLFence::create(glDisplay) : nullptr;
++    if (fence)
++        m_texture->setReuseFence(WTF::move(fence));
++    else
++        glFinish();
++}
+ 
+ void CoordinatedPlatformLayerBufferRGB::paintToTextureMapper(TextureMapper& textureMapper, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity)
+ {

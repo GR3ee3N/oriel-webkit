@@ -51,35 +51,6 @@ license_file("libpsl", "COPYING src/LICENSE.chromium", "list/public_suffix_list.
 replace("package/glib-networking/glib-networking.mk", "GLIB_NETWORKING_LICENSE = LGPL-2.0+", "GLIB_NETWORKING_LICENSE = LGPL-2.0+ with OpenSSL exception")
 license_file("glib-networking", "COPYING", "LICENSE_EXCEPTION", "85685a53e87aa7d3a70016856b646ad1b09c8e636295241f9f7c2d55cd7f05ce")
 
-# The 2.52.6 custom binding lacks the guard used by its generated header.
-(root / "package/wpewebkit/0001-guard-disabled-video-binding.patch").write_text(
-    "--- a/Source/WebCore/bindings/js/JSHTMLMediaElementCustom.cpp\n"
-    "+++ b/Source/WebCore/bindings/js/JSHTMLMediaElementCustom.cpp\n"
-    "@@ -24,6 +24,8 @@\n"
-    "  */\n"
-    " \n"
-    ' #include "config.h"\n'
-    "+// Modified for Oriel on 2026-10-08: allow builds without video.\n"
-    "+#if ENABLE(VIDEO)\n"
-    ' #include "JSHTMLMediaElement.h"\n'
-    " \n"
-    ' #include "TrackOpaqueRoot.h"\n'
-    "@@ -40,3 +42,4 @@\n"
-    " DEFINE_VISIT_ADDITIONAL_CHILDREN(JSHTMLMediaElement);\n"
-    " \n"
-    " } // namespace WebCore\n"
-    "+#endif // ENABLE(VIDEO)\n"
-)
-
-# WPEPlatform is an ENABLE feature, not a USE feature.
-(root / "package/wpewebkit/0002-fix-gamepad-platform-guard.patch").write_text(
-    "--- a/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp\n"
-    "+++ b/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp\n"
-    "@@ -253 +253,2 @@\n"
-    "-#if !PLATFORM(COCOA) && !(USE(MANETTE) && OS(LINUX)) && !USE(LIBWPE) && !USE(WPE_PLATFORM)\n"
-    "+// Modified for Oriel on 2026-10-08: fix the WPEPlatform feature guard.\n"
-    "+#if !PLATFORM(COCOA) && !(USE(MANETTE) && OS(LINUX)) && !USE(LIBWPE) && !ENABLE(WPE_PLATFORM)\n"
-    "@@ -274 +275 @@\n"
-    "-#endif // !PLATFORM(COCOA) && !(USE(MANETTE) && OS(LINUX)) && !USE(LIBWPE) && !USE(WPE_PLATFORM)\n"
-    "+#endif // !PLATFORM(COCOA) && !(USE(MANETTE) && OS(LINUX)) && !USE(LIBWPE) && !ENABLE(WPE_PLATFORM)\n"
-)
+# WebKit's patches are in build/patches/wpewebkit; Buildroot applies them in name order.
+for patch in sorted((Path(__file__).parent / "patches/wpewebkit").glob("*.patch")):
+    (root / "package/wpewebkit" / patch.name).write_bytes(patch.read_bytes())

@@ -1,0 +1,13 @@
+Fix the gamepad platform guard
+
+WPEPlatform is an ENABLE feature, not a USE feature.
+
+--- a/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp
++++ b/Source/WebKit/UIProcess/Gamepad/UIGamepadProvider.cpp
+@@ -253 +253,2 @@
+-#if !PLATFORM(COCOA) && !(USE(MANETTE) && OS(LINUX)) && !USE(LIBWPE) && !USE(WPE_PLATFORM)
++// Modified for Oriel on 2026-10-08: fix the WPEPlatform feature guard.
++#if !PLATFORM(COCOA) && !(USE(MANETTE) && OS(LINUX)) && !USE(LIBWPE) && !ENABLE(WPE_PLATFORM)
+@@ -274 +275 @@
+-#endif // !PLATFORM(COCOA) && !(USE(MANETTE) && OS(LINUX)) && !USE(LIBWPE) && !USE(WPE_PLATFORM)
++#endif // !PLATFORM(COCOA) && !(USE(MANETTE) && OS(LINUX)) && !USE(LIBWPE) && !ENABLE(WPE_PLATFORM)

@@ -1,0 +1,20 @@
+Guard the disabled video binding
+
+The 2.52.6 custom binding lacks the guard used by its generated header.
+
+--- a/Source/WebCore/bindings/js/JSHTMLMediaElementCustom.cpp
++++ b/Source/WebCore/bindings/js/JSHTMLMediaElementCustom.cpp
+@@ -24,6 +24,8 @@
+  */
+ 
+ #include "config.h"
++// Modified for Oriel on 2026-10-08: allow builds without video.
++#if ENABLE(VIDEO)
+ #include "JSHTMLMediaElement.h"
+ 
+ #include "TrackOpaqueRoot.h"
+@@ -40,3 +42,4 @@
+ DEFINE_VISIT_ADDITIONAL_CHILDREN(JSHTMLMediaElement);
+ 
+ } // namespace WebCore
++#endif // ENABLE(VIDEO)
