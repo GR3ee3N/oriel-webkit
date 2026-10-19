@@ -34,7 +34,7 @@ wpe, glibc = os.environ["WPE_VERSION"], os.environ["GLIBC_VERSION"]
 replace("package/wpewebkit/wpewebkit.mk", "WPEWEBKIT_VERSION = 2.50.5", f"WPEWEBKIT_VERSION = {wpe}")
 replace("package/wpewebkit/wpewebkit.mk", "webp wpebackend-fdo", "webp libxkbcommon libdrm libgbm woff2")
 replace("package/wpewebkit/Config.in", "select BR2_PACKAGE_WPEBACKEND_FDO", "select BR2_PACKAGE_LIBXKBCOMMON")
-replace("package/wpewebkit/wpewebkit.mk", "-DPORT=WPE", '-DPORT=WPE \\\n\t-DENABLE_WPE_PLATFORM=ON \\\n\t-DENABLE_WPE_PLATFORM_HEADLESS=ON \\\n\t-DENABLE_WPE_PLATFORM_DRM=OFF \\\n\t-DENABLE_WPE_PLATFORM_WAYLAND=OFF \\\n\t-DENABLE_WPE_LEGACY_API=OFF \\\n\t-DUSE_LIBHYPHEN=OFF \\\n\t-DENABLE_PDFJS=OFF')
+replace("package/wpewebkit/wpewebkit.mk", "-DPORT=WPE", '-DPORT=WPE \\\n\t-DENABLE_WPE_PLATFORM=ON \\\n\t-DENABLE_WPE_PLATFORM_HEADLESS=ON \\\n\t-DENABLE_WPE_PLATFORM_DRM=OFF \\\n\t-DENABLE_WPE_PLATFORM_WAYLAND=OFF \\\n\t-DENABLE_WPE_LEGACY_API=OFF \\\n\t-DUSE_LIBHYPHEN=OFF \\\n\t-DENABLE_PDFJS=OFF \\\n\t-DENABLE_SPELLCHECK=OFF')
 replace("package/wpewebkit/wpewebkit.mk", "-DENABLE_WEB_CODECS=OFF", '-DENABLE_WEB_CODECS=OFF \\\n\t-DUSE_GSTREAMER=OFF')
 replace("package/glibc/glibc.mk", "GLIBC_VERSION = 2.44-36-g2d5421ffca8893534d5e02ad38c28acd8e778fa3", f"GLIBC_VERSION = {glibc}")
 replace("package/glibc/glibc.mk", "GLIBC_SITE = https://gitlab.com/gnutools/glibc.git\nGLIBC_SITE_METHOD = git", "GLIBC_SITE = https://ftp.gnu.org/gnu/glibc\nGLIBC_SOURCE = glibc-$(GLIBC_VERSION).tar.xz")
