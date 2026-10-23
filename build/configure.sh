@@ -18,7 +18,7 @@ printf '%s  %s\n' "$BUILDROOT_SHA256" "$ARCHIVE" | sha256sum --check
 tar -xJf "$ARCHIVE" --strip-components=1 -C "$BR"
 python3 build/prepare.py "$BR"
 make -C "$BR" O="$OUTPUT" BR2_DEFCONFIG="$PWD/build/runtime.config" defconfig
-# Kconfig silently drops unsupported selections; catch that before compiling.
+# Verify required selections after Kconfig resolution, which can drop unsupported symbols.
 for symbol in BR2_PACKAGE_WPEWEBKIT BR2_PACKAGE_MESA3D_OPENGL_ES; do
     grep -qx "$symbol=y" "$OUTPUT/.config" || { echo "$symbol was not enabled" >&2; exit 1; }
 done

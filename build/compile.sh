@@ -13,7 +13,7 @@ export BR2_DL_DIR=$CACHE/downloads
 TREE=$CACHE/build/tree
 BR=$TREE/source
 OUTPUT=$TREE/output
-# Buildroot doesn't rebuild packages whose inputs changed.
+# Start with a fresh tree because Buildroot can retain packages after their inputs change.
 rm -rf "$TREE"
 build/configure.sh "$TREE"
 make -C "$BR" O="$OUTPUT" BR2_JLEVEL="$JOBS" wpewebkit glib-networking xkeyboard-config dejavu shared-mime-info

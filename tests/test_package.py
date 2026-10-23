@@ -87,7 +87,7 @@ class PackageTests(unittest.TestCase):
 
     def test_webkit_bundled_licenses_exclude_unshipped_code(self):
         root = self.root
-        # WebKit's bundled components, minus tests, tools and pdf.js.
+        # Model bundled WebKit components and excluded test, tool and pdf.js directories.
         webkit = root / ".cache/wpewebkit"
         for name in ("Source/WebCore/LICENSE-APPLE", "Source/ThirdParty/skia/LICENSE", "Source/WTF/wtf/dtoa/COPYING",
                      "Source/ThirdParty/pdfjs/LICENSE", "Source/ThirdParty/gtest/LICENSE", "Source/WTF/wtf/Vector.h"):
@@ -110,7 +110,7 @@ class PackageTests(unittest.TestCase):
 
     def test_legal_info_rejects_missing_licenses_and_sources(self):
         root = self.root
-        # Distributed packages need their license texts; only copyleft ones also their source.
+        # Require license texts for all shipped packages and source archives for copyleft packages.
         legal = root / ".cache/legal"
         legal.mkdir(parents=True)
         with (legal / "manifest.csv").open("w") as stream:

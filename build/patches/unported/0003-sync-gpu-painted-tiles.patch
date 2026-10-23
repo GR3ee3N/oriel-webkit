@@ -1,11 +1,10 @@
 Synchronize GPU-painted tiles across GL contexts
 
-The compositor and the Skia painting threads share pooled GL textures across
-contexts without fences; Mali-G310 then runs their GPU work out of order and
-tiles show old pixels. Painted tiles are copied, painting targets (tiles and
-scrollbars) are pooled apart from the compositor's textures, and a texture's
-next writer waits for its last reader (or the work finishes when no fence can
-be made).
+Skia painting threads and the compositor reuse textures from a shared pool.
+On Mali-G310, GPU work from different contexts can run out of order, leaving
+stale tile pixels. Keep painting targets in a separate pool and copy painted
+tiles into compositor textures. Fence each texture's last GPU use before its
+next writer reuses it. If a fence cannot be created, wait for GPU completion.
 
 --- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.cpp
 +++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreTile.cpp
@@ -28,11 +27,11 @@ be made).
 -                m_texture->swapTexture(buffer.texture());
 -            } else
 -                m_texture->copyFromExternalTexture(buffer.texture().id(), update.sourceRect, toIntSize(update.bufferOffset));
-+            // Modified for Oriel on 2026-10-14: always copy, so that painted textures stay with the
-+            // painting contexts and tile textures with the compositor, and fence the copy:
-+            // the painter that gets this texture next must not draw into it before the
-+            // copy has read it. Mali-G310 runs the GPU work of different contexts out of
-+            // order, so without the fence old pixels could win.
++            // Modified for Oriel on 2026-10-14: always copy tiles to keep painting and compositor
++            // textures in separate pools. Fence the copy before the painting texture
++            // returns to a writer; that writer must wait until the copy finishes
++            // reading it. Mali-G310 can execute work from different GL contexts out
++            // of order, allowing stale pixels to overwrite the current tile.
 +            m_texture->copyFromExternalTexture(buffer.texture().id(), update.sourceRect, toIntSize(update.bufferOffset));
 +            auto& glDisplay = PlatformDisplay::sharedDisplay().glDisplay();
 +            std::unique_ptr<GLFence> fence = GLFence::isSupported(glDisplay) ? GLFence::create(glDisplay) : nullptr;
@@ -65,9 +64,9 @@ be made).
          ForceLinearBuffer = 1 << 3,
          ForceVivanteSuperTiledBuffer = 1 << 4,
  #endif
-+        // Modified for Oriel on 2026-10-14: what Skia paints tiles and scrollbars into; the
-+        // pool keeps these apart from the compositor's textures, so two GL contexts never
-+        // write one texture.
++        // Modified for Oriel on 2026-10-14: reserve these textures for painting tiles
++        // and scrollbars. Keep them separate from compositor textures so two GL
++        // contexts cannot write to the same texture.
 +        PaintingTarget = 1 << 5,
      };
  
@@ -76,9 +75,9 @@ be made).
  
      void copyFromExternalTexture(GLuint sourceTextureID, const IntRect& targetRect, const IntSize& sourceOffset);
  
-+    // Modified for Oriel on 2026-10-14: the GPU work that last used the texture in another
-+    // context; the next context to draw into it waits for it first. A fence is only
-+    // replaced by one of later work, so a borrower that gives up keeps it in place.
++    // Modified for Oriel on 2026-10-14: retain a fence for the texture's last GPU use
++    // in another context. The next writer waits on it. Replace it only with a fence
++    // for later work; a borrower that aborts must preserve the existing fence.
 +    void setReuseFence(std::unique_ptr<GLFence>&&);
 +    void waitForReuse();
 +
@@ -119,8 +118,8 @@ be made).
  
 +void BitmapTexture::waitForReuse()
 +{
-+    // The fence stays: the wait only orders this context, and a borrower that fails
-+    // before drawing must leave the texture as protected as it found it.
++    // Retain the fence because this wait orders only the current context.
++    // A borrower that aborts before drawing must preserve protection for later users.
 +    Locker locker { m_reuseFenceLock };
 +    if (m_reuseFence)
 +        m_reuseFence->serverWait();
@@ -135,7 +134,7 @@ be made).
              && entry.texture->flags().contains(BitmapTexture::Flags::ForceLinearBuffer) == flags.contains(BitmapTexture::Flags::ForceLinearBuffer)
              && entry.texture->flags().contains(BitmapTexture::Flags::ForceVivanteSuperTiledBuffer) == flags.contains(BitmapTexture::Flags::ForceVivanteSuperTiledBuffer)
  #endif
-+            // Modified for Oriel on 2026-10-14: painting targets are never shared with the compositor.
++            // Modified for Oriel on 2026-10-14: match painting targets only with their own pool.
 +            && entry.texture->flags().contains(BitmapTexture::Flags::PaintingTarget) == flags.contains(BitmapTexture::Flags::PaintingTarget)
              && entry.texture->flags().contains(BitmapTexture::Flags::DepthBuffer) == flags.contains(BitmapTexture::Flags::DepthBuffer);
      });
@@ -147,7 +146,7 @@ be made).
          PlatformDisplay::sharedDisplay().skiaGLContext()->makeContextCurrent();
  
 -        OptionSet<BitmapTexture::Flags> textureFlags;
-+        // Modified for Oriel on 2026-10-14: a texture only painting contexts draw into.
++        // Modified for Oriel on 2026-10-14: acquire a texture reserved for painting contexts.
 +        OptionSet<BitmapTexture::Flags> textureFlags { BitmapTexture::Flags::PaintingTarget };
          if (!contentsOpaque)
              textureFlags.add(BitmapTexture::Flags::SupportsAlpha);
@@ -161,8 +160,8 @@ be made).
 -CoordinatedAcceleratedTileBuffer::~CoordinatedAcceleratedTileBuffer() = default;
 +CoordinatedAcceleratedTileBuffer::~CoordinatedAcceleratedTileBuffer()
 +{
-+    // Modified for Oriel on 2026-10-14: a paint nobody used; whoever draws into the
-+    // texture next must still wait for it.
++    // Modified for Oriel on 2026-10-14: retain the fence for discarded painting
++    // work so the next texture writer waits for its completion.
 +    if (m_fence)
 +        m_texture->setReuseFence(WTF::move(m_fence));
 +}
@@ -173,8 +172,8 @@ be made).
      if (!PlatformDisplay::sharedDisplay().skiaGLContext()->makeContextCurrent())
          return false;
  
-+    // Modified for Oriel on 2026-10-14: wait, in the context that paints, for the GPU work
-+    // that last used the texture elsewhere.
++    // Modified for Oriel on 2026-10-14: wait in the painting context for the
++    // texture's pending GPU work from other contexts.
 +    m_texture->waitForReuse();
 +
      GrGLTextureInfo externalTexture;
@@ -187,8 +186,8 @@ be made).
      GLContext::ScopedGLContextCurrent scopedCurrent(*glContext);
  
 -    Ref texture = BitmapTexturePool::singleton().acquireTexture(state.frameRect.size(), { BitmapTexture::Flags::SupportsAlpha });
-+    // Modified for Oriel on 2026-10-14: a painting target, like tiles, and wait in this
-+    // context for the GPU work that last used it elsewhere.
++    // Modified for Oriel on 2026-10-14: reserve scrollbar textures for painting
++    // and wait here for their pending GPU work from other contexts.
 +    Ref texture = BitmapTexturePool::singleton().acquireTexture(state.frameRect.size(), { BitmapTexture::Flags::SupportsAlpha, BitmapTexture::Flags::PaintingTarget });
 +    texture->waitForReuse();
  
@@ -200,8 +199,8 @@ be made).
  
 -    grContext->flushAndSubmit(surface.get(), GLFence::isSupported(display.glDisplay()) ? GrSyncCpu::kNo : GrSyncCpu::kYes);
 -    auto buffer = CoordinatedPlatformLayerBufferRGB::create(WTF::move(texture), { TextureMapperFlags::ShouldBlend }, GLFence::create(display.glDisplay()));
-+    // Modified for Oriel on 2026-10-14: as tiles do, finish the paint here when no fence
-+    // can be made, so that a buffer without a fence never has painting pending.
++    // Modified for Oriel on 2026-10-14: finish painting synchronously if fence
++    // creation fails, so every unfenced buffer is ready for use.
 +    std::unique_ptr<GLFence> fence;
 +    if (GLFence::isSupported(display.glDisplay())) {
 +        grContext->flushAndSubmit(surface.get(), GrSyncCpu::kNo);
@@ -233,10 +232,10 @@ be made).
 -CoordinatedPlatformLayerBufferRGB::~CoordinatedPlatformLayerBufferRGB() = default;
 +CoordinatedPlatformLayerBufferRGB::~CoordinatedPlatformLayerBufferRGB()
 +{
-+    // Modified for Oriel on 2026-10-14: a painting target goes back to the pool fenced.
-+    // Not drawn: its paint's fence still applies (a paint without one has finished).
-+    // Drawn by the compositor, whose context is current here: fence that draw, or
-+    // wait for it.
++    // Modified for Oriel on 2026-10-14: protect painting targets on return to the pool.
++    // Preserve the paint fence if the compositor did not draw the texture.
++    // Otherwise, fence the compositor's read in its current context, or wait
++    // synchronously if no fence can be created.
 +    if (!m_texture || !m_texture->flags().contains(BitmapTexture::Flags::PaintingTarget))
 +        return;
 +    if (m_fence) {

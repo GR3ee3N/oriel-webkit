@@ -18,7 +18,7 @@ class StageTests(unittest.TestCase):
             text = Path(temporary) / "text"
             text.write_text("not a binary")
             self.assertIs(stage.elf_info(text), None)
-            # Reject an x86_64 ELF header even when the test itself runs on ARM64.
+            # Use an x86_64 fixture to verify rejection independently of the test host architecture.
             wrong_arch = Path(temporary) / "x86_64.elf"
             wrong_arch.write_bytes(struct.pack("<16sHHIQQQIHHHHHH", b"\x7fELF\x02\x01\x01", 1, 62, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0))
             try:
@@ -45,7 +45,7 @@ class StageTests(unittest.TestCase):
                         (sysroot / path).symlink_to("libglib-2.0.so.0")
                     else:
                         (sysroot / path).write_text(path)
-            # Only the add-on's libraries; no ELF files here, so nothing to strip.
+            # Restrict the fixture to shipped libraries; text files require no ELF stripping.
             stage.dev(output, Path(temporary) / "dev", "false", {"libglib-2.0.so.0"})
             copied = sorted(file.relative_to(Path(temporary) / "dev").as_posix() for file in (Path(temporary) / "dev").rglob("*") if not file.is_dir())
             self.assertEqual(copied, ["usr/include/EGL/egl.h", "usr/include/glib.h", "usr/lib/libglib-2.0.so", "usr/lib/libglib-2.0.so.0", "usr/lib/pkgconfig/glib-2.0.pc"], copied)

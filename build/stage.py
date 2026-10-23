@@ -1,4 +1,4 @@
-"""Stages WebKit's add-on, minus what CoreELEC has, and the dev sysroot apps build against."""
+"""Stage the WebKit runtime and development sysroot, excluding CoreELEC libraries."""
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -10,7 +10,7 @@ BOX = dict(line.split("=", 1) for line in (Path(__file__).parent / "box.env").re
 CORE = re.compile(BOX["LIBRARIES"])
 
 
-# The rest of share/ is docs and tooling.
+# Retain runtime data from usr/share; exclude documentation and build tooling.
 SHARE = {"fontconfig", "fonts", "mime", "wpe-webkit-2.0", "X11"}
 
 
@@ -25,7 +25,7 @@ def ignore(directory, names):
 
 
 def prune(out):
-    """Dynamic loads are not visible in DT_NEEDED; their modules must be roots."""
+    """Keep dynamically loaded modules as dependency roots because DT_NEEDED omits them."""
     lib = out / "lib"
     roots = []
     for file in out.rglob("*"):
@@ -42,7 +42,7 @@ def prune(out):
             reached.add(file)
             dynamic = subprocess.check_output(["readelf", "-d", str(file)], text=True)
             pending += [names[name] for name in re.findall(r"\(NEEDED\).*\[(.*?)\]", dynamic) if name in names]
-    # Decide before deleting: symlink chains no longer resolve once their file is gone.
+    # Resolve all symlink chains before deleting files so reachability checks remain valid.
     unused = [file for file in lib.rglob("*.so*") if file.resolve() not in reached]
     for file in unused:
         file.unlink()
@@ -69,18 +69,18 @@ def elf_info(file):
     if not re.search(r"Machine:\s+AArch64", header):
         raise SystemExit(f"not an ARM64 binary: {file}")
     versions = subprocess.check_output(["readelf", "-V", str(file)], text=True)
-    # Only requirements, not the versions a library itself exports.
+    # Inspect required symbol versions without including versions exported by the library.
     require_versions(file, versions.partition("Version needs section")[2])
     dynamic = subprocess.check_output(["readelf", "-d", str(file)], text=True)
     return re.findall(r"\(NEEDED\).*\[(.*?)\]", dynamic)
 
 
-# The box's libc and libstdc++, and the kernel's headers; apps link against their own toolchain's.
+# Apps use their own toolchain's libc/libstdc++ and kernel headers.
 TOOLCHAIN = {"gcc-final", "glibc", "linux-headers"}
 
 
 def dev(output, destination, strip, shipped):
-    """Headers and pkg-config files of every staged package but the toolchain, and the add-on's libraries."""
+    """Copy package headers, pkg-config files and shipped libraries, excluding toolchain files."""
     sysroot = output / "host/aarch64-buildroot-linux-gnu/sysroot"
     for listing in sorted((output / "build").glob("*/.files-list-staging.txt")):
         for line in listing.read_text().splitlines():
@@ -90,7 +90,7 @@ def dev(output, destination, strip, shipped):
                     path.parts[:2] in {("usr", "include"), ("usr", "lib")} or path.parts[:3] == ("usr", "share", "pkgconfig")):
                 continue
             source, target = sysroot / path, destination / path
-            # Distribute no library the add-on doesn't; the box brings its own graphics libraries.
+            # Include only runtime-shipped libraries; CoreELEC supplies graphics libraries.
             if ".so" in path.name and source.resolve().name not in shipped:
                 continue
             if source.is_symlink() or source.is_file():
@@ -100,7 +100,7 @@ def dev(output, destination, strip, shipped):
                     target.symlink_to(source.readlink())
                 else:
                     shutil.copy2(source, target)
-                    # Linking needs only the dynamic symbols.
+                    # Strip symbols not required for dynamic linking.
                     with target.open("rb") as stream:
                         if stream.read(4) == b"\x7fELF":
                             subprocess.run([str(strip), "--strip-unneeded", str(target)], check=True)
@@ -117,7 +117,7 @@ def main():
         if not any(out.rglob(name)):
             raise SystemExit(f"missing runtime component: {name}")
     prune(out)
-    # Mali exports GBM, but CoreELEC provides no libgbm.so.1 filename.
+    # Resolve libgbm.so.1 through libMali.so, which exports CoreELEC's GBM symbols.
     (out / "lib/libgbm.so.1").symlink_to("libMali.so")
     provided = {file.name for file in (out / "lib").rglob("*") if file.is_file() or file.is_symlink()}
     for file in out.rglob("*"):
@@ -128,7 +128,7 @@ def main():
                 raise SystemExit(f"missing runtime libraries for {file}: {', '.join(missing)}")
             subprocess.run([str(strip), "--strip-unneeded", str(file)], check=True)
     dev(target.parent, devdir / "sysroot", strip, provided)
-    # Libraries supplied by the add-on; box.env describes CoreELEC's separately.
+    # Record add-on libraries separately from the CoreELEC contract in box.env.
     (devdir / "provided.txt").write_text("".join(f"{name}\n" for name in sorted(provided)))
     shutil.copy(Path(__file__).parent / "box.env", devdir)
 

@@ -1,4 +1,4 @@
-"""Wait for Kodi to register an add-on, then verify that it is enabled."""
+"""Wait for Kodi registration and ensure the add-on is enabled."""
 import codecs
 import json
 import socket
@@ -50,7 +50,7 @@ def enable(addon):
                     return
                 kodi.call("Addons.SetAddonEnabled", {"addonid": addon, "enabled": True})
             except RuntimeError:
-                pass  # UpdateLocalAddons may not have registered the add-on yet.
+                pass  # Registration after UpdateLocalAddons can still be pending.
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"Kodi did not enable {addon}")
             time.sleep(0.25)

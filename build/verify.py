@@ -1,4 +1,4 @@
-"""Checks the resolved Buildroot configuration and staged native output."""
+"""Validate the resolved Buildroot configuration and staged ARM64 runtime."""
 from pathlib import Path
 import re
 import subprocess
@@ -8,7 +8,7 @@ import stage
 
 
 def config(file):
-    # Kconfig resolves dependencies; GPL-3.0 readline must not come in through bash.
+    # Check resolved dependencies so Bash cannot introduce GPL-3.0 readline into SQLite.
     text = file.read_text()
     if "BR2_PACKAGE_READLINE=y" in text or "BR2_PACKAGE_BASH=y" in text:
         raise SystemExit("Bash/readline must not be enabled in the runtime")

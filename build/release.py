@@ -1,4 +1,4 @@
-"""Packages the WebKit add-on and its dev sysroot with their licenses and sources."""
+"""Package the WebKit runtime, development sysroot, license texts and source archives."""
 import csv
 import hashlib
 import os
@@ -26,12 +26,12 @@ def digest(file):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-# Licenses that require publishing the source.
+# Identify copyleft licenses for source archive publication.
 COPYLEFT = re.compile(r"\b[AL]?GPL\b|\bMPL\b|\bEPL\b|\bCDDL\b")
 
 
 def shipped(output, usr, listing_name=".files-list.txt"):
-    """Buildroot packages with files in this tree."""
+    """Identify Buildroot packages owning regular files in the staged tree."""
     owner = {}
     for listing in (output / "build").glob(f"*/{listing_name}"):
         for line in listing.read_text().splitlines():
@@ -48,7 +48,7 @@ def shipped(output, usr, listing_name=".files-list.txt"):
 
 
 def validate_legal(directory, packages):
-    """Returns the package-version names to publish licenses and sources for."""
+    """Validate shipped-package legal records and return license/source archive names."""
     licenses, sources, found = set(), set(), set()
     with (directory / "manifest.csv").open() as stream:
         for row in csv.DictReader(stream):
@@ -75,7 +75,7 @@ def tar_tree(directory, destination):
 
 
 def zip_tree(directory, destination):
-    # Old upstream files predate ZIP's 1980 epoch.
+    # Permit upstream timestamps older than ZIP's minimum year of 1980.
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False) as archive:
         for file in sorted(directory.rglob("*")):
             require(not file.is_symlink(), f"ZIP must not contain Unix links: {file}")
@@ -86,12 +86,12 @@ def checksum(file):
     file.with_name(file.name + ".sha256").write_text(f"{digest(file)}  {file.name}\n")
 
 
-# Tests, build tools and the disabled pdf.js don't ship.
+# Exclude unshipped tests, build tools and disabled pdf.js components.
 UNSHIPPED = {"gtest", "tests", "test_utils", "tools", "unifdef", "util", "pdfjs"}
 
 
 def webkit_licenses(source, destination):
-    """Buildroot declares only WebCore's licenses; WebKit bundles more code."""
+    """Collect bundled WebKit license files beyond the WebCore licenses listed by Buildroot."""
     for file in sorted((source / "Source").rglob("*")):
         relative = file.relative_to(source)
         if file.is_file() and LICENSE_FILE.match(file.name) and not UNSHIPPED & set(relative.parts):
@@ -138,7 +138,7 @@ def package(runtime, source, licenses, destination):
     zip_tree(addon, files / zip_name)
     tar_tree(dev, files / f"{dev.name}.tar.xz")
     tar_tree(source, files / f"{source.name}.tar.xz")
-    # Kodi's index, served from the latest release with the zip it names.
+    # Publish the Kodi index beside its referenced ZIP in the latest release.
     addons = ET.Element("addons")
     element = ET.fromstring((REPO / "addon/addon.xml").read_text().replace("@VERSION@", v).encode())
     ET.SubElement(element.find('extension[@point="xbmc.addon.metadata"]'), "path").text = zip_name
@@ -169,12 +169,12 @@ def main():
     licensed, sourced = validate_legal(legal, packages)
 
     def published(directory, names):
-        # Leave out build tools, the toolchain and permissive packages' sources.
+        # Publish shipped-package licenses and copyleft sources, excluding host build tools.
         return {legal: ["host-sources"],
                 legal / "licenses": [name for name in names if name not in licensed],
                 legal / "sources": [name for name in names if name not in sourced]}.get(Path(directory), [])
     shutil.copytree(legal, source / "legal-info", ignore=published)
-    # Its checksum list still names the omitted files.
+    # Remove the checksum manifest because it includes excluded files.
     (source / "legal-info/legal-info.sha256").unlink(missing_ok=True)
     shutil.copy(REPO / f".cache/downloads/buildroot-{os.environ['BUILDROOT_VERSION']}.tar.xz", source)
     shutil.copy(runtime / "buildroot.config", source)
@@ -196,7 +196,7 @@ def main():
     webkit_licenses(output / "build" / wpe, licenses / wpe)
 
     package(runtime, source, licenses, destination)
-    # tools/release.sh publishes only packages of the commit it releases.
+    # Record the source commit so tools/release.sh can verify package provenance.
     (destination / "COMMIT").write_text(commit + "\n")
     for leftover in (destination / "packages", source, licenses):
         shutil.rmtree(leftover)
